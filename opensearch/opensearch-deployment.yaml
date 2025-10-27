@@ -1,0 +1,64 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opensearch
+  labels:
+    app: opensearch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: opensearch
+  template:
+    metadata:
+      labels:
+        app: opensearch
+    spec:
+      containers:
+      - name: opensearch
+        image: opensearchproject/opensearch:2.19.3 # Use a specific version for stability if needed
+        ports:
+        - containerPort: 9200
+          name: http
+        - containerPort: 9600
+          name: transport
+        env:
+        # Disable security for simplicity (NOT recommended for production)
+        - name: "discovery.type"
+          value: "single-node"
+        - name: "DISABLE_INSTALL_DEMO_CONFIG"
+          value: "true"
+        - name: "plugins.security.disabled"
+          value: "true"
+        - name: "plugins.query.datasources.encryption.masterkey"
+          value: "41472394357d899babb657d1" # openssl rand -hex 12
+        # Minimum memory settings for single node
+        - name: "OPENSEARCH_JAVA_OPTS"
+          value: "-Xms512m -Xmx512m"
+#        resources:
+#          limits:
+#            memory: "1Gi" # Minimum recommended memory
+#            cpu: "500m"
+#          requests:
+#            memory: "1Gi"
+#            cpu: "250m"
+        readinessProbe:
+          httpGet:
+            path: /_cluster/health
+            port: 9200
+          initialDelaySeconds: 60
+          periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  labels:
+    app: opensearch
+spec:
+  selector:
+    app: opensearch
+  ports:
+  - name: http
+    port: 9200
+    targetPort: 9200
