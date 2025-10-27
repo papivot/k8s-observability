@@ -1,0 +1,160 @@
+mode: daemonset
+
+# Tolerations to allow scheduling on control-plane nodes
+tolerations:
+  - key: "node-role.kubernetes.io/control-plane"
+    operator: "Exists"
+    effect: "NoSchedule"
+  - operator: Exists
+    effect: NoExecute
+
+image:
+  repository: otel/opentelemetry-collector-contrib
+  # Optionally pin to a specific tag for stability
+  # tag: "0.98.0" # Example tag
+
+presets:
+  logsCollection:
+    enabled: true # Enables filelog receiver config injection + volume mounts
+  hostMetrics:
+    enabled: true  # Enables hostmetrics receiver config injection + volume mounts
+  kubernetesAttributes:
+    enabled: true # Enables k8sattributes processor config injection + RBAC
+  kubeletMetrics:
+    enabled: true  # Enables kubeletstats receiver config injection + RBAC
+
+clusterRole:
+  rules:
+    - apiGroups: [""] # Core API group
+      resources: ["nodes"]
+      verbs: ["get"]
+
+# Define the collector's configuration explicitly
+config:
+  receivers:
+    # filelog receiver (config injected by preset, but definition needed)
+    filelog: {}
+      # The preset configures include paths, exclude paths, start_at: end etc.
+      # You can override specific preset settings here if needed, e.g.:
+      # start_at: beginning
+
+    # hostmetrics receiver (config injected by preset, but definition needed)
+    hostmetrics: {}
+      # The preset configures scrapers (cpu, disk, filesystem, etc.) and root_path
+      # You can override specific scrapers here if needed, e.g.:
+      # scrapers:
+      #   cpu:
+      #   memory:
+
+    # kubeletstats receiver (explicit config needed for reliability)
+    kubeletstats:
+      auth_type: serviceAccount
+      endpoint: "${env:K8S_NODE_IP}:10250"
+      insecure_skip_verify: true
+      k8s_api_config:
+        auth_type: serviceAccount
+      # Optional: uncomment to collect container and volume metrics
+      # metric_groups:
+      #   - node
+      #   - pod
+      #   - container
+      #   - volume
+
+    # OTLP receiver for local applications on the node
+    otlp:
+      protocols:
+        grpc:
+          # Listen on Pod IP for local connections
+          endpoint: "${env:MY_POD_IP}:4317"
+        http:
+          endpoint: "${env:MY_POD_IP}:4318"
+
+  processors:
+    # Standard processors for performance and resilience
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 75 # Adjust based on resource limits
+      spike_limit_percentage: 15
+    batch: {}
+
+    # k8sattributes processor (definition needed, config injected by preset)
+    # This will be used by traces and logs pipelines ONLY.
+    k8sattributes: {}
+      # The preset configures filter, extract, pod_association etc.
+      # You can override settings here if needed, e.g., to extract specific labels:
+      # extract:
+      #   labels:
+      #     - key: app
+      #     - key: component
+      #       key_regex: environment
+      #       from: pod # default
+    resourcedetection:
+      detectors: [env, system, k8snode] # Detect common attributes + K8s node
+      # Optional: Override specific detectors if needed
+      # override: false
+
+  exporters:
+    # Export ALL data to the central gateway collector service
+    otlp:
+      endpoint: "otel-gateway-collector:4317" # Assumes gateway service name
+      tls:
+        insecure: true # Typically okay for in-cluster traffic
+      # Optional: Add retry/queue settings
+      # sending_queue:
+      #   enabled: true
+      #   queue_size: 1000
+      # retry_on_failure:
+      #   enabled: true
+
+    # Debug exporter (useful for troubleshooting)
+    debug:
+      # Set to 'detailed' during debug, 'basic' or remove for normal operation
+      verbosity: basic
+
+  extensions:
+    # Required for Kubernetes liveness/readiness probes
+    health_check:
+      endpoint: "${env:MY_POD_IP}:13133"
+
+  # Define the pipelines
+  service:
+    extensions: [health_check]
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlp, debug]
+      metrics:
+        receivers: [otlp, kubeletstats, hostmetrics]
+        processors: [memory_limiter, resourcedetection, batch]
+        exporters: [otlp, debug]
+      logs:
+        receivers: [otlp, filelog]
+        processors: [memory_limiter, k8sattributes, batch]
+        exporters: [otlp, debug]
+    # Configure collector's own telemetry (optional but recommended)
+    telemetry:
+      metrics:
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  host: "${env:MY_POD_IP}" # Bind to pod IP
+                  port: 8888 # Default port for self-metrics
+                    #        address: "${env:MY_POD_IP}:8888" # Expose internal metrics
+
+# -- Resource limits & requests for the agent pods
+# It is HIGHLY recommended to set resource limits.
+resources:
+  limits:
+#    cpu: 300m
+    memory: 512Mi
+  requests:
+#    cpu: 100m
+    memory: 256Mi
+
+# Required by hostmetrics preset
+hostNetwork: false # Usually false unless specific network scrapers need it
+
+# Required by filelog preset
+dnsPolicy: ClusterFirstWithHostNet

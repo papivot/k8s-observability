@@ -1,0 +1,140 @@
+mode: deployment
+
+# Use a predictable name for the Service, which agents will target
+fullnameOverride: otel-gateway-collector
+
+# Use the -contrib image
+image:
+  repository: otel/opentelemetry-collector-contrib
+  # tag: "0.98.0" # Example tag
+
+# Enable presets for cluster-level data sources and RBAC
+presets:
+  clusterMetrics:
+    enabled: true # Enables k8s_cluster receiver config injection + RBAC
+  kubernetesEvents:
+    enabled: true # Enables k8s_objects receiver config injection + RBAC
+
+# Expose the Prometheus exporter port
+ports:
+  metrics:
+    enabled: true
+    containerPort: 8889 # Internal port number used by prometheus exporter endpoint
+    servicePort: 8889   # Port exposed by the Service
+    protocol: TCP
+
+# Create a ServiceMonitor for Prometheus Operator discovery
+serviceMonitor:
+  enabled: true
+  # Add the label your Prometheus Operator installation watches for
+  extraLabels:
+    release: kps # IMPORTANT: Change "kps" to your Prometheus release name
+
+# Define the collector's configuration explicitly
+config:
+  receivers:
+    # OTLP receiver for data from agents
+    otlp:
+      protocols:
+        grpc:
+          # Listen on all interfaces (0.0.0.0) within the pod
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+    # k8s_cluster receiver (config injected by preset, definition needed)
+    k8s_cluster: {}
+      # The preset configures collection_interval, node_conditions_to_report etc.
+      # Override preset settings here if needed
+
+    # k8s_objects receiver (config injected by preset, definition needed)
+    k8sobjects:
+      objects:
+      - name: events          # Watch for event objects
+        mode: watch           # Use the watch mode
+        group: events.k8s.io  # API group for events
+      # The preset configures objects (events), mode (watch), exclude_watch_type etc.
+      # Override preset settings here if needed
+
+  processors:
+    # Standard processors for performance and resilience
+    memory_limiter:
+      check_interval: 1s
+      limit_percentage: 75 # Adjust based on resource limits
+      spike_limit_percentage: 15
+    batch: {}
+
+  exporters:
+    # Prometheus exporter for metrics scrape endpoint
+    prometheus:
+      endpoint: "0.0.0.0:8889" # Match the ports.metrics.containerPort
+      enable_open_metrics: true
+      resource_to_telemetry_conversion:
+        enabled: true
+
+    # OTLP exporter configured for Jaeger backend
+    otlp/jaeger:
+      endpoint: "jaeger-collector.jaeger.svc.cluster.local:4317" # Verify Jaeger service endpoint
+      tls:
+        insecure: true # Adjust if Jaeger requires TLS
+      # Optional: Add retry/queue settings
+      # sending_queue:
+      #   enabled: true
+      # retry_on_failure:
+      #   enabled: true
+
+    opensearch:
+      # Use the service name and port of your OpenSearch deployment
+      http:
+        endpoint: "http://opensearch.logging.svc.cluster.local:9200"
+      # Define how log indices should be named (e.g., daily)
+      logs_index: "otel-logs-%{service.name}"
+      logs_index_fallback: "default-service"
+      logs_index_time_format: "yyyy.MM.dd"
+
+    # Debug exporter (useful for troubleshooting)
+    debug:
+      verbosity: basic
+
+  extensions:
+    # Required for Kubernetes liveness/readiness probes
+    health_check:
+      endpoint: "${env:MY_POD_IP}:13133"
+
+  # Define the pipelines
+  service:
+    extensions: [health_check]
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [memory_limiter, batch]
+        exporters: [otlp/jaeger, debug]
+      metrics:
+        receivers: [otlp, k8s_cluster]
+        processors: [memory_limiter, batch]
+        exporters: [prometheus, debug]
+      logs:
+        receivers: [otlp, k8sobjects]
+        processors: [memory_limiter, batch]
+        exporters: [debug, opensearch]
+    # Configure collector's own telemetry (optional but recommended)
+    telemetry:
+      metrics:
+        readers:
+          - pull:
+              exporter:
+                prometheus:
+                  # Bind to the Pod's IP address
+                  host: "${env:MY_POD_IP}"
+                  # Default port for self-metrics scrape endpoint
+                  port: 8888
+
+# -- Resource limits & requests for the gateway pods
+# Gateway might need more resources depending on cluster size and throughput
+#resources:
+#  limits:
+#    cpu: 1000m # 1 core
+#    memory: 2Gi
+#  requests:
+#    cpu: 200m
+#    memory: 512Mi
