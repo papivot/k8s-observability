@@ -59,7 +59,7 @@ spec:
       value:
         ntp:
           servers:
-          - time3.lvn.broadcom.net
+          - time.google.com
         sshd:
           banner: '---AUTHORIZED ACCESS ONLY--- Use of this system is restricted to
             authorized users for authorized activities only. '
